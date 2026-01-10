@@ -2,8 +2,6 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date
 import plotly.express as px
-import gspread
-from google.oauth2.service_account import Credentials
 
 st.set_page_config(
     page_title="Finanze Personali",
@@ -18,21 +16,12 @@ st.markdown("---")
 
 @st.cache_resource
 def init_gsheets():
-    """Inizializza connessione a Google Sheets"""
-    scope = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds = Credentials.from_service_account_info(
-        st.secrets["connections"]["gsheets"],
-        scopes=scope
-    )
-    gc = gspread.authorize(creds)
-    spreadsheet = gc.open_by_key(st.secrets["config"]["SPREADSHEET_ID"])
-    return spreadsheet
+    """Inizializza connessione a Google Sheets pubblico"""
+    conn = st.connection("gsheets", type="GSheetsConnection")
+    return conn
 
 try:
-    spreadsheet = init_gsheets()
+    gsheets_conn = init_gsheets()
 except Exception as e:
     st.error(f"Errore connessione Google Sheets: {e}")
     st.stop()
@@ -70,7 +59,7 @@ FIXED_KEYWORDS = {
     "Utenze casa": ["enel", "a2a", "hera", "iren", "gas", "luce", "energia", "acqua"],
     "Abbonamenti ricorrenti": [
         "netflix", "spotify", "prime video", "now tv", "disney",
-        "abbonamento", "subscription", "telefono", "mobile", "internet", "fibra"
+        "abbonamento", "subscription", "telefono", "mobile", "internet", "fibra", "iliad"
     ],
     "Rate & debiti": ["prestito", "loan", "finanziamento", "rate", "credito al consumo"],
 }
@@ -82,12 +71,12 @@ VARIABLE_KEYWORDS = {
     ],
     "Spesa supermercato": [
         "esselunga", "coop", "iper", "ipercoop", "conad", "carrefour",
-        "lidl", "md", "pam", "aldi", "eurospin"
+        "lidl", "md", "pam", "aldi", "eurospin", "eurospar", "bennet"
     ],
     "Trasporti & mobilità": [
         "atm", "trenitalia", "italo", "uber", "bolt", "taxi",
         "carburante", "benzina", "diesel", "telepass",
-        "enjoy", "share now", "sharenow", "free now", "freenow"
+        "enjoy", "share now", "sharenow", "free now", "freenow", "tper", "ridemovi"
     ],
     "Sport & benessere": [
         "palestra", "gym", "fitness", "decathlon", "sport center",
@@ -95,7 +84,7 @@ VARIABLE_KEYWORDS = {
     ],
     "Salute": [
         "farmacia", "pharmacy", "medico", "analisi", "ticket",
-        "dentista", "ottico", "occhiali", "visita", "esame"
+        "dentista", "ottico", "occhiali", "visita", "esame", "unobravo"
     ],
     "Tabacco & vizi": [
         "tabacchi", "tabaccheria", "sigarette", "tobacco",
@@ -103,7 +92,7 @@ VARIABLE_KEYWORDS = {
     ],
     "Shopping & extra": [
         "amazon", "zalando", "zara", "h&m", "hm",
-        "mediaworld", "unieuro", "ikea"
+        "mediaworld", "unieuro", "ikea", "temu"
     ],
     "Cultura & formazione": [
         "libreria", "feltrinelli", "ibs", "corso", "master", "udemy",
@@ -132,7 +121,7 @@ SAVINGS_INVEST_KEYWORDS = {
         "fineco", "directa", "interactive brokers", "broker"
     ],
     "Crypto & speculativi": [
-        "binance", "coinbase", "kraken", "crypto.com", "bitpanda"
+        "binance", "coinbase", "kraken", "crypto.com", "bitpanda", "revolut"
     ],
     "Altri investimenti": [
         "polizza", "assicurazione vita", "gestione patrimoniale"
@@ -140,8 +129,8 @@ SAVINGS_INVEST_KEYWORDS = {
 }
 
 INCOME_KEYWORDS = {
-    "Stipendio & lavoro": ["stipendio", "salary", "paga", "retribuzione", "busta paga"],
-    "Rimborsi & rientri": ["rimborso", "refund", "rimborso spese", "chargeback"],
+    "Stipendio & lavoro": ["stipendio", "salary", "paga", "retribuzione", "busta paga", "azioninnova"],
+    "Rimborsi & rientri": ["rimborso", "refund", "rimborso spese", "chargeback", "accredito"],
     "Entrate passive": ["interessi", "dividendo", "royalty", "cedola"],
 }
 
@@ -156,7 +145,7 @@ def normalize_merchant(desc: str) -> str:
     txt = normalize_text(desc)
     remove_tokens = [
         "pagamento pos", "pagamento carta", "acquisto carta",
-        "operazione pos", "contactless", "e-commerce", "ecommerce"
+        "operazione pos", "contactless", "e-commerce", "ecommerce", "pagamento"
     ]
     for t in remove_tokens:
         txt = txt.replace(t, " ")
@@ -278,22 +267,33 @@ def build_internal_df(
 def save_to_gsheets(df_categorized: pd.DataFrame):
     """Salva i dati nel Google Sheet"""
     try:
-        general_sheet = spreadsheet.worksheet("Generale")
-        rows_to_save = []
-        for _, row in df_categorized.iterrows():
-            rows_to_save.append([
-                row["date"].strftime("%d/%m/%Y") if pd.notnull(row["date"]) else "",
-                row["description"],
-                f"{row['amount']:.2f}" if pd.notnull(row["amount"]) else "",
-                row["account"],
-                row["direction"],
-                row["macro_category"],
-                row["subcategory"],
-                row["normalized_merchant"],
-            ])
-        if rows_to_save:
-            general_sheet.append_rows(rows_to_save)
-            st.success(f"✅ {len(rows_to_save)} transazioni salvate nel Google Sheet!")
+        sheet_url = st.secrets["config"]["SPREADSHEET_URL"]
+        
+        # Prepara i dati per il salvataggio
+        df_to_save = df_categorized.copy()
+        df_to_save["date"] = df_to_save["date"].dt.strftime("%d/%m/%Y")
+        df_to_save["amount"] = df_to_save["amount"].round(2)
+        
+        # Scrivi nel foglio Generale (append)
+        existing_data = gsheets_conn.read(spreadsheet=sheet_url, worksheet="Generale")
+        
+        # Se il foglio ha solo intestazioni, scriviamo direttamente
+        if len(existing_data) <= 1:
+            gsheets_conn.update(
+                spreadsheet=sheet_url,
+                worksheet="Generale",
+                data=df_to_save[["date", "description", "amount", "account", "direction", "macro_category", "subcategory", "normalized_merchant"]]
+            )
+        else:
+            # Append ai dati esistenti
+            combined = pd.concat([existing_data, df_to_save[["date", "description", "amount", "account", "direction", "macro_category", "subcategory", "normalized_merchant"]]], ignore_index=True)
+            gsheets_conn.update(
+                spreadsheet=sheet_url,
+                worksheet="Generale",
+                data=combined
+            )
+        
+        st.success(f"✅ {len(df_categorized)} transazioni salvate nel Google Sheet!")
     except Exception as e:
         st.error(f"❌ Errore nel salvataggio: {e}")
 
@@ -442,7 +442,7 @@ if uploaded_file is not None:
                 names="macro_category",
                 values="value_for_chart",
                 hole=0.4,
-                title="Distribuzione importi per macro-categoria (spese in valore assoluto)",
+                title="Distribuzione importi per macro-categoria",
             )
             st.plotly_chart(fig_macro, use_container_width=True)
         else:
@@ -462,7 +462,7 @@ if uploaded_file is not None:
                 x="amount_abs",
                 y="subcategory",
                 orientation="h",
-                title="Spese variabili per sottocategoria (valore assoluto)",
+                title="Spese variabili per sottocategoria",
                 labels={"amount_abs": "Importo €", "subcategory": "Categoria"},
             )
             st.plotly_chart(fig_sub, use_container_width=True)
@@ -489,3 +489,4 @@ else:
           cambiarle dalla mappatura.
         """
     )
+
