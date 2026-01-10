@@ -288,7 +288,7 @@ def save_to_gsheets(df_categorized: pd.DataFrame):
         if spreadsheet is None:
                     st.info("Google Sheets integration non configurata. Dati non salvati.")
                     return
-    try:
+try:
         general_sheet = spreadsheet.worksheet("Generale")
         
         rows_to_save = []
