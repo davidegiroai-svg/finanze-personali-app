@@ -284,7 +284,6 @@ def save_to_gsheets(df_categorized: pd.DataFrame):
     try:
         general_sheet = spreadsheet.worksheet("Generale")
         
-        # Prepara i dati per il salvataggio
         rows_to_save = []
         for _, row in df_categorized.iterrows():
             rows_to_save.append([
@@ -298,7 +297,6 @@ def save_to_gsheets(df_categorized: pd.DataFrame):
                 row["normalized_merchant"],
             ])
         
-        # Aggiungi le righe al foglio
         if rows_to_save:
             general_sheet.append_rows(rows_to_save)
             st.success(f"✅ {len(rows_to_save)} transazioni salvate nel Google Sheet!")
@@ -364,4 +362,143 @@ if uploaded_file is not None:
         col_iban = st.selectbox(
             "Colonna IBAN / conto (opzionale)",
             options=["(nessuna)"] + columns,
-            index=(columns.index(default_iban) + 1
+            index=(columns.index(default_iban) + 1) if default_iban in columns else 0,
+        )
+
+    if st.button("✅ Conferma mappatura e prepara dati"):
+        df_internal = build_internal_df(
+            df_raw=df_raw,
+            col_date=col_date,
+            col_desc=col_desc,
+            col_amount=col_amount,
+            col_name=None if col_name == "(nessuna)" else col_name,
+            col_type=None if col_type == "(nessuna)" else col_type,
+            col_iban=None if col_iban == "(nessuna)" else col_iban,
+        )
+
+        df_categorized = df_internal.apply(categorize_row, axis=1)
+
+        st.subheader("📚 Transazioni categorizzate")
+        st.dataframe(
+            df_categorized,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.metric("Numero transazioni", len(df_categorized))
+        with col_b:
+            saldo = df_categorized["amount"].sum(skipna=True)
+            st.metric("Saldo totale", f"€ {saldo:,.2f}")
+        with col_c:
+            data_min = df_categorized["date"].min()
+            data_max = df_categorized["date"].max()
+            periodo = (
+                f"{data_min.date()} → {data_max.date()}"
+                if pd.notnull(data_min) and pd.notnull(data_max)
+                else "N/D"
+            )
+            st.metric("Periodo coperto", periodo)
+
+        # Salva nel Google Sheet
+        save_to_gsheets(df_categorized)
+
+        st.markdown("### 🎛 Filtro periodo")
+        start_date, end_date = st.date_input(
+            "Seleziona intervallo date",
+            value=(data_min.date() if pd.notnull(data_min) else date.today(),
+                   data_max.date() if pd.notnull(data_max) else date.today()),
+        )
+
+        mask = df_categorized["date"].between(
+            pd.to_datetime(start_date), pd.to_datetime(end_date)
+        )
+        df_filtered = df_categorized[mask].copy()
+
+        df_filtered["amount_abs"] = df_filtered["amount"].abs()
+
+        st.markdown("### 📌 Sintesi periodo selezionato")
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.metric("Numero transazioni", len(df_filtered))
+        with col_b:
+            saldo_reale = df_filtered["amount"].sum(skipna=True)
+            st.metric("Saldo netto (Entrate - Uscite)", f"€ {saldo_reale:,.2f}")
+        with col_c:
+            spese_fisse = df_filtered.loc[
+                df_filtered["macro_category"] == "Fisso", "amount_abs"
+            ].sum()
+            spese_var = df_filtered.loc[
+                df_filtered["macro_category"] == "Variabile", "amount_abs"
+            ].sum()
+            st.metric(
+                "Spese fisse / variabili",
+                f"Fisso: {spese_fisse:,.0f}€ • Var: {spese_var:,.0f}€"
+            )
+
+        st.markdown("### 🥧 Macro-categorie (Entrate / Fissi / Variabili / Risparmi)")
+        df_macro = df_filtered.copy()
+        df_macro["value_for_chart"] = df_macro.apply(
+            lambda r: r["amount"] if r["macro_category"] == "Entrata" else r["amount_abs"],
+            axis=1,
+        )
+        agg_macro = (
+            df_macro.groupby("macro_category")["value_for_chart"]
+            .sum()
+            .reset_index()
+        )
+        if not agg_macro.empty:
+            fig_macro = px.pie(
+                agg_macro,
+                names="macro_category",
+                values="value_for_chart",
+                hole=0.4,
+                title="Distribuzione importi per macro-categoria (spese in valore assoluto)",
+            )
+            st.plotly_chart(fig_macro, use_container_width=True)
+        else:
+            st.info("Nessuna transazione nel periodo selezionato.")
+
+        st.markdown("### 📊 Sottocategorie spese variabili")
+        df_var = df_filtered[df_filtered["macro_category"] == "Variabile"]
+        agg_sub = (
+            df_var.groupby("subcategory")["amount_abs"]
+            .sum()
+            .reset_index()
+            .sort_values("amount_abs")
+        )
+        if not agg_sub.empty:
+            fig_sub = px.bar(
+                agg_sub,
+                x="amount_abs",
+                y="subcategory",
+                orientation="h",
+                title="Spese variabili per sottocategoria (valore assoluto)",
+                labels={"amount_abs": "Importo €", "subcategory": "Categoria"},
+            )
+            st.plotly_chart(fig_sub, use_container_width=True)
+        else:
+            st.info("Nessuna spesa variabile nel periodo selezionato.")
+
+        st.markdown("### 📚 Transazioni filtrate")
+        st.dataframe(
+            df_filtered.drop(columns=["amount_abs"]),
+            use_container_width=True,
+            hide_index=True
+        )
+
+else:
+    st.info("👆 Carica un CSV dal sidebar per iniziare.")
+    st.markdown(
+        """
+        **Consigli CSV Hype**
+
+        - Esporta da Hype in formato CSV.
+        - Le colonne tipiche sono: `Data operazione`, `Data contabile`, `Iban`,
+          `Tipologia`, `Nome`, `Descrizione`, `Importo ( € )`.
+        - L'app proverà a riconoscerle automaticamente, ma puoi sempre
+          cambiarle dalla mappatura.
+        """
+    )
+
