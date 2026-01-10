@@ -22,19 +22,177 @@ st.sidebar.markdown("—")
 st.sidebar.caption("Supporto Hype + altre banche (mappatura colonne manuale).")
 
 
+# ---------- UTILITÀ CARICAMENTO CSV ----------
+
 def load_csv(file) -> pd.DataFrame:
     """Carica il CSV provando separatori ; e ,"""
     try:
-        # Prova con separatore ; (molte banche italiane)
         df = pd.read_csv(file, sep=";")
         if df.shape[1] == 1:
-            # Se c'è solo una colonna, riprova con virgola
             file.seek(0)
             df = pd.read_csv(file, sep=",")
     except Exception:
         file.seek(0)
         df = pd.read_csv(file)
     return df
+
+
+# ---------- REGOLE DI CATEGORIZZAZIONE ----------
+
+# Macro-categorie e sottocategorie ispirate alle best practice di budgeting
+# (Entrate, Fissi, Variabili, Risparmi & investimenti).[web:90][web:93][web:26]
+FIXED_KEYWORDS = {
+    "Affitto / mutuo": ["affitto", "rent", "mutuo", "mortgage"],
+    "Utenze casa": ["enel", "a2a", "hera", "iren", "hera", "gas", "luce", "energia", "acqua"],
+    "Abbonamenti ricorrenti": [
+        "netflix", "spotify", "prime video", "now tv", "disney",
+        "abbonamento", "subscription", "telefono", "mobile", "internet", "fibra"
+    ],
+    "Rate & debiti": ["prestito", "loan", "finanziamento", "rate", "credito al consumo"],
+}
+
+VARIABLE_KEYWORDS = {
+    "Cene & aperitivi": [
+        "ristorante", "restaurant", "trattoria", "osteria", "pizzeria",
+        "pub", "bar", "caffe", "caffè", "aperitivo", "apericena"
+    ],
+    "Spesa supermercato": [
+        "esselunga", "coop", "iper", "ipercoop", "conad", "carrefour",
+        "lidl", "md", "pam", "aldi", "eurospin"
+    ],
+    "Trasporti & mobilità": [
+        "atm", "trenitalia", "italo", "uber", "bolt", "taxi",
+        "carburante", "benzina", "diesel", "telepass",
+        "enjoy", "share now", "sharenow", "free now", "freenow"
+    ],
+    "Sport & benessere": [
+        "palestra", "gym", "fitness", "decathlon", "sport center",
+        "yoga", "pilates", "spa", "wellness"
+    ],
+    "Salute": [
+        "farmacia", "pharmacy", "medico", "analisi", "ticket",
+        "dentista", "ottico", "occhiali", "visita", "esame"
+    ],
+    "Tabacco & vizi": [
+        "tabacchi", "tabaccheria", "sigarette", "tobacco",
+        "svapo", "vape", "sisal", "lotto", "scommessa"
+    ],
+    "Shopping & extra": [
+        "amazon", "zalando", "zara", "h&m", "hm",
+        "mediaworld", "unieuro", "ikea"
+    ],
+    "Cultura & formazione": [
+        "libreria", "feltrinelli", "ibs", "corso", "master", "udemy",
+        "coursera", "libro", "libri"
+    ],
+    "Casa & arredo": [
+        "brico", "leroy merlin", "obi", "ikea", "casaforte", "arredo"
+    ],
+    "Animali": [
+        "zooplus", "arcaplanet", "pet shop", "toelettatura"
+    ],
+    "Viaggi": [
+        "booking.com", "airbnb", "hotel", "ryanair", "easyjet", "wizzair"
+    ],
+    "Regali": [
+        "regalo", "gift", "fiori", "florist"
+    ],
+}
+
+SAVINGS_INVEST_KEYWORDS = {
+    "Risparmio conto / deposito": [
+        "conto deposito", "risparmio", "saving", "savings"
+    ],
+    "Investimenti azioni/ETF": [
+        "degiro", "etoro", "revolut trading", "trade republic",
+        "fineco", "directa", "interactive brokers", "broker"
+    ],
+    "Crypto & speculativi": [
+        "binance", "coinbase", "kraken", "crypto.com", "bitpanda"
+    ],
+    "Altri investimenti": [
+        "polizza", "assicurazione vita", "gestione patrimoniale"
+    ],
+}
+
+INCOME_KEYWORDS = {
+    "Stipendio & lavoro": ["stipendio", "salary", "paga", "retribuzione", "busta paga"],
+    "Rimborsi & rientri": ["rimborso", "refund", "rimborso spese", "chargeback"],
+    "Entrate passive": ["interessi", "dividendo", "royalty", "cedola"],
+}
+
+
+def normalize_text(s: str) -> str:
+    if not isinstance(s, str):
+        s = str(s)
+    return s.lower()
+
+
+def normalize_merchant(desc: str) -> str:
+    """
+    Normalizza il merchant togliendo parole standard (POS, PAGAMENTO, ecc.).
+    Qui teniamo una versione semplice ma estendibile.
+    """
+    txt = normalize_text(desc)
+    remove_tokens = [
+        "pagamento pos", "pagamento carta", "acquisto carta",
+        "operazione pos", "contactless", "e-commerce", "ecommerce"
+    ]
+    for t in remove_tokens:
+        txt = txt.replace(t, " ")
+    return " ".join(txt.split())
+
+
+def match_keywords(description: str, rules: dict) -> str | None:
+    """Ritorna la prima categoria il cui elenco di keyword è presente nella descrizione."""
+    desc = normalize_text(description)
+    for category, words in rules.items():
+        for w in words:
+            if w in desc:
+                return category
+    return None
+
+
+def categorize_row(row: pd.Series) -> pd.Series:
+    desc = row["description"]
+    amount = row["amount"] or 0.0
+
+    # Normalized merchant
+    row["normalized_merchant"] = normalize_merchant(desc)
+
+    # 1) Entrate
+    if amount > 0:
+        sub = match_keywords(desc, INCOME_KEYWORDS)
+        row["macro_category"] = "Entrata"
+        row["subcategory"] = sub if sub else "Entrate varie"
+        return row
+
+    # Da qui in poi consideriamo solo uscite
+    # 2) Risparmi & investimenti (es. bonifici a conto deposito o broker)
+    sub_save = match_keywords(desc, SAVINGS_INVEST_KEYWORDS)
+    if sub_save:
+        row["macro_category"] = "Risparmi & investimenti"
+        row["subcategory"] = sub_save
+        return row
+
+    # 3) Costi fissi
+    sub_fixed = match_keywords(desc, FIXED_KEYWORDS)
+    if sub_fixed:
+        row["macro_category"] = "Fisso"
+        row["subcategory"] = sub_fixed
+        return row
+
+    # 4) Spese variabili (per keyword)
+    sub_var = match_keywords(desc, VARIABLE_KEYWORDS)
+    if sub_var:
+        row["macro_category"] = "Variabile"
+        row["subcategory"] = sub_var
+        return row
+
+    # 5) Default: variabile generica
+    row["macro_category"] = "Variabile"
+    row["subcategory"] = "Altro variabile"
+    return row
 
 
 def build_internal_df(
@@ -49,10 +207,10 @@ def build_internal_df(
     """Crea il DataFrame interno standard a partire dal CSV originale."""
     df = df_raw.copy()
 
-    # Data (italiana: giorno/mese/anno)
+    # Data
     df["date"] = pd.to_datetime(df[col_date], errors="coerce", dayfirst=True)
 
-    # Descrizione: uniamo Nome + Descrizione se disponibile
+    # Descrizione (Nome + Descrizione se disponibile)
     if col_name and col_name in df.columns:
         df["description"] = (
             df[col_name].astype(str).fillna("") + " - " + df[col_desc].astype(str).fillna("")
@@ -60,34 +218,22 @@ def build_internal_df(
     else:
         df["description"] = df[col_desc].astype(str)
 
-    # Importo numerico (gestione robusta di . e ,)
+    # Importo numerico robusto
     raw_amount = df[col_amount].astype(str).str.strip()
-
-    # Rimuovi simboli euro e spazi
     raw_amount = (
         raw_amount
         .str.replace("€", "", regex=False)
-        .str.replace("\u20ac", "", regex=False)  # simbolo euro alternativo
+        .str.replace("\u20ac", "", regex=False)
         .str.replace(" ", "", regex=False)
     )
 
     def parse_amount(x: str) -> float | None:
         if x is None or x == "" or x.lower() == "nan":
             return None
-
-        # Esempi:
-        # "1.234,56"  -> 1234.56  (italiano)
-        # "1234,56"   -> 1234.56
-        # "1,234.56"  -> 1234.56  (stile US/UK)
-        # "1234.56"   -> 1234.56
-
-        # Caso tipico italiano: virgola come decimale
         if "," in x and x.rfind(",") > x.rfind("."):
             x = x.replace(".", "").replace(",", ".")
-        # Caso stile inglese: punto come decimale
         elif "." in x and x.rfind(".") > x.rfind(","):
             x = x.replace(",", "")
-
         try:
             return float(x)
         except ValueError:
@@ -107,20 +253,18 @@ def build_internal_df(
     else:
         df["bank_category"] = ""
 
-    # Direzione Entrata/Uscita (per ora solo segno importo)
+    # Direzione semplice
     df["direction"] = df["amount"].apply(
         lambda x: "Entrata" if x is not None and x > 0 else "Uscita"
     )
 
-    # Campi che useremo dopo
+    # Placeholder categorizzazione
     df["macro_category"] = ""
     df["subcategory"] = ""
     df["normalized_merchant"] = ""
 
-    # Ordiniamo per data
     df = df.sort_values("date")
 
-    # Selezioniamo solo le colonne interne
     cols = [
         "date",
         "description",
@@ -135,6 +279,8 @@ def build_internal_df(
     return df[cols]
 
 
+# ---------- UI PRINCIPALE ----------
+
 if uploaded_file is not None:
     df_raw = load_csv(uploaded_file)
 
@@ -143,7 +289,6 @@ if uploaded_file is not None:
 
     st.markdown("### 🧩 Mappa le colonne del tuo estratto conto")
 
-    # Proviamo a proporre i default per Hype
     columns = df_raw.columns.tolist()
 
     def suggest(col_names, keywords):
@@ -208,22 +353,25 @@ if uploaded_file is not None:
             col_iban=None if col_iban == "(nessuna)" else col_iban,
         )
 
-        st.subheader("📚 Dati standardizzati (interni)")
+        # Applica categorizzazione automatica
+        df_categorized = df_internal.apply(categorize_row, axis=1)
+
+        st.subheader("📚 Transazioni categorizzate")
         st.dataframe(
-            df_internal,
+            df_categorized,
             use_container_width=True,
             hide_index=True
         )
 
         col_a, col_b, col_c = st.columns(3)
         with col_a:
-            st.metric("Numero transazioni", len(df_internal))
+            st.metric("Numero transazioni", len(df_categorized))
         with col_b:
-            saldo = df_internal["amount"].sum(skipna=True)
+            saldo = df_categorized["amount"].sum(skipna=True)
             st.metric("Saldo totale", f"€ {saldo:,.2f}")
         with col_c:
-            data_min = df_internal["date"].min()
-            data_max = df_internal["date"].max()
+            data_min = df_categorized["date"].min()
+            data_max = df_categorized["date"].max()
             periodo = (
                 f"{data_min.date()} → {data_max.date()}"
                 if pd.notnull(data_min) and pd.notnull(data_max)
@@ -232,8 +380,8 @@ if uploaded_file is not None:
             st.metric("Periodo coperto", periodo)
 
         st.info(
-            "Prossimo passo: categorizzazione automatica "
-            "(Fisso / Variabile / Entrate / Risparmi) e dashboard."
+            "Le colonne 'macro_category' e 'subcategory' ora sono compilate.\n"
+            "Nel prossimo step aggiungeremo grafici, Google Sheets e AI Kimi."
         )
 
 else:
@@ -249,5 +397,6 @@ else:
           cambiarle dalla mappatura.
         """
     )
+
 
 
