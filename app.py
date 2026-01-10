@@ -349,7 +349,10 @@ if uploaded_file is not None:
         mask = df_categorized["date"].between(
             pd.to_datetime(start_date), pd.to_datetime(end_date)
         )
-        df_filtered = df_categorized[mask]
+        df_filtered = df_categorized[mask].copy()
+
+        # Aggiungiamo colonna amount_abs per calcolare le spese in valore assoluto
+        df_filtered["amount_abs"] = df_filtered["amount"].abs()
 
         # ---- METRICHE ----
         st.markdown("### 📌 Sintesi periodo selezionato")
@@ -357,17 +360,30 @@ if uploaded_file is not None:
         with col_a:
             st.metric("Numero transazioni", len(df_filtered))
         with col_b:
-            saldo = df_filtered["amount"].sum(skipna=True)
-            st.metric("Saldo totale", f"€ {saldo:,.2f}")
+            saldo_reale = df_filtered["amount"].sum(skipna=True)
+            st.metric("Saldo netto (Entrate - Uscite)", f"€ {saldo_reale:,.2f}")
         with col_c:
-            tot_fisso = df_filtered.loc[df_filtered["macro_category"] == "Fisso", "amount"].sum()
-            tot_var = df_filtered.loc[df_filtered["macro_category"] == "Variabile", "amount"].sum()
-            st.metric("Spese fisse / variabili", f"Fisso: {tot_fisso:,.0f}€ • Var: {tot_var:,.0f}€")
+            spese_fisse = df_filtered.loc[
+                df_filtered["macro_category"] == "Fisso", "amount_abs"
+            ].sum()
+            spese_var = df_filtered.loc[
+                df_filtered["macro_category"] == "Variabile", "amount_abs"
+            ].sum()
+            st.metric(
+                "Spese fisse / variabili",
+                f"Fisso: {spese_fisse:,.0f}€ • Var: {spese_var:,.0f}€"
+            )
 
-        # ---- GRAFICO MACRO-CATEGORIE ----
+        # ---- GRAFICO MACRO-CATEGORIE (spese in positivo) ----
         st.markdown("### 🥧 Macro-categorie (Entrate / Fissi / Variabili / Risparmi)")
+        # per le entrate usiamo amount (positivi), per le uscite amount_abs
+        df_macro = df_filtered.copy()
+        df_macro["value_for_chart"] = df_macro.apply(
+            lambda r: r["amount"] if r["macro_category"] == "Entrata" else r["amount_abs"],
+            axis=1,
+        )
         agg_macro = (
-            df_filtered.groupby("macro_category")["amount"]
+            df_macro.groupby("macro_category")["value_for_chart"]
             .sum()
             .reset_index()
         )
@@ -375,9 +391,9 @@ if uploaded_file is not None:
             fig_macro = px.pie(
                 agg_macro,
                 names="macro_category",
-                values="amount",
+                values="value_for_chart",
                 hole=0.4,
-                title="Distribuzione importi per macro-categoria",
+                title="Distribuzione importi per macro-categoria (spese in valore assoluto)",
             )
             st.plotly_chart(fig_macro, use_container_width=True)
         else:
@@ -387,18 +403,19 @@ if uploaded_file is not None:
         st.markdown("### 📊 Sottocategorie spese variabili")
         df_var = df_filtered[df_filtered["macro_category"] == "Variabile"]
         agg_sub = (
-            df_var.groupby("subcategory")["amount"]
+            df_var.groupby("subcategory")["amount_abs"]
             .sum()
             .reset_index()
-            .sort_values("amount")
+            .sort_values("amount_abs")
         )
         if not agg_sub.empty:
             fig_sub = px.bar(
                 agg_sub,
-                x="amount",
+                x="amount_abs",
                 y="subcategory",
                 orientation="h",
-                title="Spese variabili per sottocategoria",
+                title="Spese variabili per sottocategoria (valore assoluto)",
+                labels={"amount_abs": "Importo €", "subcategory": "Categoria"},
             )
             st.plotly_chart(fig_sub, use_container_width=True)
         else:
@@ -407,7 +424,7 @@ if uploaded_file is not None:
         # ---- TABELLA COMPLETA ----
         st.markdown("### 📚 Transazioni categorizzate (filtrate)")
         st.dataframe(
-            df_filtered,
+            df_filtered.drop(columns=["amount_abs"]),
             use_container_width=True,
             hide_index=True
         )
