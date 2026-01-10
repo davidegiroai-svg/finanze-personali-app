@@ -24,14 +24,18 @@ def init_gsheets():
         "https://www.googleapis.com/auth/drive"
     ]
     creds = Credentials.from_service_account_info(
-        st.secrets["connections"]["gsheets"],
+        st.secrets.get("gsheet_creds", {}),
         scopes=scope
     )
     gc = gspread.authorize(creds)
-    spreadsheet = gc.open_by_key(st.secrets["config"]["SPREADSHEET_ID"])
+    spreadsheet = gc.open_by_key(st.secrets.get("spreadsheet_id", ""))
     return spreadsheet
 
-spreadsheet = init_gsheets()
+try:
+        spreadsheet = init_gsheets()
+    except Exception as e:
+            st.warning(f"⚠️ Google Sheets integration non disponibile: {e}")
+            spreadsheet = None
 
 st.sidebar.header("📁 Carica estratto conto")
 
@@ -281,6 +285,9 @@ def build_internal_df(
 
 def save_to_gsheets(df_categorized: pd.DataFrame):
     """Salva i dati nel Google Sheet"""
+        if spreadsheet is None:
+                    st.info("Google Sheets integration non configurata. Dati non salvati.")
+                    return
     try:
         general_sheet = spreadsheet.worksheet("Generale")
         
