@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
+import plotly.express as px
 
 st.set_page_config(
     page_title="Finanze Personali",
@@ -39,11 +40,9 @@ def load_csv(file) -> pd.DataFrame:
 
 # ---------- REGOLE DI CATEGORIZZAZIONE ----------
 
-# Macro-categorie e sottocategorie ispirate alle best practice di budgeting
-# (Entrate, Fissi, Variabili, Risparmi & investimenti).[web:90][web:93][web:26]
 FIXED_KEYWORDS = {
     "Affitto / mutuo": ["affitto", "rent", "mutuo", "mortgage"],
-    "Utenze casa": ["enel", "a2a", "hera", "iren", "hera", "gas", "luce", "energia", "acqua"],
+    "Utenze casa": ["enel", "a2a", "hera", "iren", "gas", "luce", "energia", "acqua"],
     "Abbonamenti ricorrenti": [
         "netflix", "spotify", "prime video", "now tv", "disney",
         "abbonamento", "subscription", "telefono", "mobile", "internet", "fibra"
@@ -129,10 +128,6 @@ def normalize_text(s: str) -> str:
 
 
 def normalize_merchant(desc: str) -> str:
-    """
-    Normalizza il merchant togliendo parole standard (POS, PAGAMENTO, ecc.).
-    Qui teniamo una versione semplice ma estendibile.
-    """
     txt = normalize_text(desc)
     remove_tokens = [
         "pagamento pos", "pagamento carta", "acquisto carta",
@@ -144,7 +139,6 @@ def normalize_merchant(desc: str) -> str:
 
 
 def match_keywords(description: str, rules: dict) -> str | None:
-    """Ritorna la prima categoria il cui elenco di keyword è presente nella descrizione."""
     desc = normalize_text(description)
     for category, words in rules.items():
         for w in words:
@@ -157,39 +151,32 @@ def categorize_row(row: pd.Series) -> pd.Series:
     desc = row["description"]
     amount = row["amount"] or 0.0
 
-    # Normalized merchant
     row["normalized_merchant"] = normalize_merchant(desc)
 
-    # 1) Entrate
     if amount > 0:
         sub = match_keywords(desc, INCOME_KEYWORDS)
         row["macro_category"] = "Entrata"
         row["subcategory"] = sub if sub else "Entrate varie"
         return row
 
-    # Da qui in poi consideriamo solo uscite
-    # 2) Risparmi & investimenti (es. bonifici a conto deposito o broker)
     sub_save = match_keywords(desc, SAVINGS_INVEST_KEYWORDS)
     if sub_save:
         row["macro_category"] = "Risparmi & investimenti"
         row["subcategory"] = sub_save
         return row
 
-    # 3) Costi fissi
     sub_fixed = match_keywords(desc, FIXED_KEYWORDS)
     if sub_fixed:
         row["macro_category"] = "Fisso"
         row["subcategory"] = sub_fixed
         return row
 
-    # 4) Spese variabili (per keyword)
     sub_var = match_keywords(desc, VARIABLE_KEYWORDS)
     if sub_var:
         row["macro_category"] = "Variabile"
         row["subcategory"] = sub_var
         return row
 
-    # 5) Default: variabile generica
     row["macro_category"] = "Variabile"
     row["subcategory"] = "Altro variabile"
     return row
@@ -204,13 +191,10 @@ def build_internal_df(
     col_type: str | None = None,
     col_iban: str | None = None
 ) -> pd.DataFrame:
-    """Crea il DataFrame interno standard a partire dal CSV originale."""
     df = df_raw.copy()
 
-    # Data
     df["date"] = pd.to_datetime(df[col_date], errors="coerce", dayfirst=True)
 
-    # Descrizione (Nome + Descrizione se disponibile)
     if col_name and col_name in df.columns:
         df["description"] = (
             df[col_name].astype(str).fillna("") + " - " + df[col_desc].astype(str).fillna("")
@@ -218,7 +202,6 @@ def build_internal_df(
     else:
         df["description"] = df[col_desc].astype(str)
 
-    # Importo numerico robusto
     raw_amount = df[col_amount].astype(str).str.strip()
     raw_amount = (
         raw_amount
@@ -241,24 +224,20 @@ def build_internal_df(
 
     df["amount"] = raw_amount.apply(parse_amount)
 
-    # Account / IBAN
     if col_iban and col_iban in df.columns:
         df["account"] = df[col_iban].astype(str)
     else:
         df["account"] = "Conto principale"
 
-    # Tipologia originale banca
     if col_type and col_type in df.columns:
         df["bank_category"] = df[col_type].astype(str)
     else:
         df["bank_category"] = ""
 
-    # Direzione semplice
     df["direction"] = df["amount"].apply(
         lambda x: "Entrata" if x is not None and x > 0 else "Uscita"
     )
 
-    # Placeholder categorizzazione
     df["macro_category"] = ""
     df["subcategory"] = ""
     df["normalized_merchant"] = ""
@@ -341,8 +320,6 @@ if uploaded_file is not None:
         )
 
     if st.button("✅ Conferma mappatura e prepara dati"):
-        st.success("Mappatura confermata, preparo i dati standardizzati...")
-
         df_internal = build_internal_df(
             df_raw=df_raw,
             col_date=col_date,
@@ -353,35 +330,86 @@ if uploaded_file is not None:
             col_iban=None if col_iban == "(nessuna)" else col_iban,
         )
 
-        # Applica categorizzazione automatica
         df_categorized = df_internal.apply(categorize_row, axis=1)
 
-        st.subheader("📚 Transazioni categorizzate")
-        st.dataframe(
-            df_categorized,
-            use_container_width=True,
-            hide_index=True
+        # ---- FILTRI PERIODO ----
+        st.markdown("### 🎛 Filtro periodo")
+        min_dt = df_categorized["date"].min()
+        max_dt = df_categorized["date"].max()
+        start_default = min_dt.date() if pd.notnull(min_dt) else date.today()
+        end_default = max_dt.date() if pd.notnull(max_dt) else date.today()
+
+        start_date, end_date = st.date_input(
+            "Seleziona intervallo date",
+            value=(start_default, end_default),
+            min_value=start_default,
+            max_value=end_default,
         )
 
+        mask = df_categorized["date"].between(
+            pd.to_datetime(start_date), pd.to_datetime(end_date)
+        )
+        df_filtered = df_categorized[mask]
+
+        # ---- METRICHE ----
+        st.markdown("### 📌 Sintesi periodo selezionato")
         col_a, col_b, col_c = st.columns(3)
         with col_a:
-            st.metric("Numero transazioni", len(df_categorized))
+            st.metric("Numero transazioni", len(df_filtered))
         with col_b:
-            saldo = df_categorized["amount"].sum(skipna=True)
+            saldo = df_filtered["amount"].sum(skipna=True)
             st.metric("Saldo totale", f"€ {saldo:,.2f}")
         with col_c:
-            data_min = df_categorized["date"].min()
-            data_max = df_categorized["date"].max()
-            periodo = (
-                f"{data_min.date()} → {data_max.date()}"
-                if pd.notnull(data_min) and pd.notnull(data_max)
-                else "N/D"
-            )
-            st.metric("Periodo coperto", periodo)
+            tot_fisso = df_filtered.loc[df_filtered["macro_category"] == "Fisso", "amount"].sum()
+            tot_var = df_filtered.loc[df_filtered["macro_category"] == "Variabile", "amount"].sum()
+            st.metric("Spese fisse / variabili", f"Fisso: {tot_fisso:,.0f}€ • Var: {tot_var:,.0f}€")
 
-        st.info(
-            "Le colonne 'macro_category' e 'subcategory' ora sono compilate.\n"
-            "Nel prossimo step aggiungeremo grafici, Google Sheets e AI Kimi."
+        # ---- GRAFICO MACRO-CATEGORIE ----
+        st.markdown("### 🥧 Macro-categorie (Entrate / Fissi / Variabili / Risparmi)")
+        agg_macro = (
+            df_filtered.groupby("macro_category")["amount"]
+            .sum()
+            .reset_index()
+        )
+        if not agg_macro.empty:
+            fig_macro = px.pie(
+                agg_macro,
+                names="macro_category",
+                values="amount",
+                hole=0.4,
+                title="Distribuzione importi per macro-categoria",
+            )
+            st.plotly_chart(fig_macro, use_container_width=True)
+        else:
+            st.info("Nessuna transazione nel periodo selezionato.")
+
+        # ---- GRAFICO SOTTOCATEGORIE VARIABILI ----
+        st.markdown("### 📊 Sottocategorie spese variabili")
+        df_var = df_filtered[df_filtered["macro_category"] == "Variabile"]
+        agg_sub = (
+            df_var.groupby("subcategory")["amount"]
+            .sum()
+            .reset_index()
+            .sort_values("amount")
+        )
+        if not agg_sub.empty:
+            fig_sub = px.bar(
+                agg_sub,
+                x="amount",
+                y="subcategory",
+                orientation="h",
+                title="Spese variabili per sottocategoria",
+            )
+            st.plotly_chart(fig_sub, use_container_width=True)
+        else:
+            st.info("Nessuna spesa variabile nel periodo selezionato.")
+
+        # ---- TABELLA COMPLETA ----
+        st.markdown("### 📚 Transazioni categorizzate (filtrate)")
+        st.dataframe(
+            df_filtered,
+            use_container_width=True,
+            hide_index=True
         )
 
 else:
@@ -397,6 +425,3 @@ else:
           cambiarle dalla mappatura.
         """
     )
-
-
-
