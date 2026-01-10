@@ -12,20 +12,6 @@ st.set_page_config(
 st.title("💰 Gestione Finanze Personali")
 st.markdown("---")
 
-# ---------- CONNESSIONE GOOGLE SHEETS ----------
-
-@st.cache_resource
-def init_gsheets():
-    """Inizializza connessione a Google Sheets pubblico"""
-    conn = st.connection("gsheets", type="GSheetsConnection")
-    return conn
-
-try:
-    gsheets_conn = init_gsheets()
-except Exception as e:
-    st.error(f"Errore connessione Google Sheets: {e}")
-    st.stop()
-
 st.sidebar.header("📁 Carica estratto conto")
 
 uploaded_file = st.sidebar.file_uploader(
@@ -55,11 +41,11 @@ def load_csv(file) -> pd.DataFrame:
 # ---------- REGOLE DI CATEGORIZZAZIONE ----------
 
 FIXED_KEYWORDS = {
-    "Affitto / mutuo": ["affitto", "rent", "mutuo", "mortgage"],
+    "Affitto / mutuo": ["affitto", "rent", "mutuo", "mortgage", "ferrari giuliana"],
     "Utenze casa": ["enel", "a2a", "hera", "iren", "gas", "luce", "energia", "acqua"],
     "Abbonamenti ricorrenti": [
         "netflix", "spotify", "prime video", "now tv", "disney",
-        "abbonamento", "subscription", "telefono", "mobile", "internet", "fibra", "iliad"
+        "abbonamento", "subscription", "telefono", "mobile", "internet", "fibra", "iliad", "hype plus"
     ],
     "Rate & debiti": ["prestito", "loan", "finanziamento", "rate", "credito al consumo"],
 }
@@ -67,16 +53,16 @@ FIXED_KEYWORDS = {
 VARIABLE_KEYWORDS = {
     "Cene & aperitivi": [
         "ristorante", "restaurant", "trattoria", "osteria", "pizzeria",
-        "pub", "bar", "caffe", "caffè", "aperitivo", "apericena"
+        "pub", "bar", "caffe", "caffè", "aperitivo", "apericena", "kebab"
     ],
     "Spesa supermercato": [
         "esselunga", "coop", "iper", "ipercoop", "conad", "carrefour",
-        "lidl", "md", "pam", "aldi", "eurospin", "eurospar", "bennet"
+        "lidl", "md", "pam", "aldi", "eurospin", "eurospar", "bennet", "mercato"
     ],
     "Trasporti & mobilità": [
         "atm", "trenitalia", "italo", "uber", "bolt", "taxi",
         "carburante", "benzina", "diesel", "telepass",
-        "enjoy", "share now", "sharenow", "free now", "freenow", "tper", "ridemovi"
+        "enjoy", "share now", "sharenow", "free now", "freenow", "tper", "ridemovi", "buffet"
     ],
     "Sport & benessere": [
         "palestra", "gym", "fitness", "decathlon", "sport center",
@@ -88,7 +74,7 @@ VARIABLE_KEYWORDS = {
     ],
     "Tabacco & vizi": [
         "tabacchi", "tabaccheria", "sigarette", "tobacco",
-        "svapo", "vape", "sisal", "lotto", "scommessa"
+        "svapo", "vape", "sisal", "lotto", "scommessa", "palabingo"
     ],
     "Shopping & extra": [
         "amazon", "zalando", "zara", "h&m", "hm",
@@ -99,16 +85,16 @@ VARIABLE_KEYWORDS = {
         "coursera", "libro", "libri"
     ],
     "Casa & arredo": [
-        "brico", "leroy merlin", "obi", "ikea", "casaforte", "arredo"
+        "brico", "leroy merlin", "obi", "ikea", "casaforte", "arredo", "risparmio casa"
     ],
     "Animali": [
         "zooplus", "arcaplanet", "pet shop", "toelettatura"
     ],
     "Viaggi": [
-        "booking.com", "airbnb", "hotel", "ryanair", "easyjet", "wizzair"
+        "booking.com", "airbnb", "hotel", "ryanair", "easyjet", "wizzair", "albergo"
     ],
     "Regali": [
-        "regalo", "gift", "fiori", "florist"
+        "regalo", "gift", "fiori", "florist", "flower"
     ],
 }
 
@@ -121,7 +107,7 @@ SAVINGS_INVEST_KEYWORDS = {
         "fineco", "directa", "interactive brokers", "broker"
     ],
     "Crypto & speculativi": [
-        "binance", "coinbase", "kraken", "crypto.com", "bitpanda", "revolut"
+        "binance", "coinbase", "kraken", "crypto.com", "bitpanda"
     ],
     "Altri investimenti": [
         "polizza", "assicurazione vita", "gestione patrimoniale"
@@ -129,8 +115,8 @@ SAVINGS_INVEST_KEYWORDS = {
 }
 
 INCOME_KEYWORDS = {
-    "Stipendio & lavoro": ["stipendio", "salary", "paga", "retribuzione", "busta paga", "azioninnova"],
-    "Rimborsi & rientri": ["rimborso", "refund", "rimborso spese", "chargeback", "accredito"],
+    "Stipendio & lavoro": ["stipendio", "salary", "paga", "retribuzione", "busta paga", "azioninnova", "saldo", "compenso"],
+    "Rimborsi & rientri": ["rimborso", "refund", "rimborso spese", "chargeback", "accredito", "restituzione", "referendum"],
     "Entrate passive": ["interessi", "dividendo", "royalty", "cedola"],
 }
 
@@ -264,40 +250,6 @@ def build_internal_df(
     return df[cols]
 
 
-def save_to_gsheets(df_categorized: pd.DataFrame):
-    """Salva i dati nel Google Sheet"""
-    try:
-        sheet_url = st.secrets["config"]["SPREADSHEET_URL"]
-        
-        # Prepara i dati per il salvataggio
-        df_to_save = df_categorized.copy()
-        df_to_save["date"] = df_to_save["date"].dt.strftime("%d/%m/%Y")
-        df_to_save["amount"] = df_to_save["amount"].round(2)
-        
-        # Scrivi nel foglio Generale (append)
-        existing_data = gsheets_conn.read(spreadsheet=sheet_url, worksheet="Generale")
-        
-        # Se il foglio ha solo intestazioni, scriviamo direttamente
-        if len(existing_data) <= 1:
-            gsheets_conn.update(
-                spreadsheet=sheet_url,
-                worksheet="Generale",
-                data=df_to_save[["date", "description", "amount", "account", "direction", "macro_category", "subcategory", "normalized_merchant"]]
-            )
-        else:
-            # Append ai dati esistenti
-            combined = pd.concat([existing_data, df_to_save[["date", "description", "amount", "account", "direction", "macro_category", "subcategory", "normalized_merchant"]]], ignore_index=True)
-            gsheets_conn.update(
-                spreadsheet=sheet_url,
-                worksheet="Generale",
-                data=combined
-            )
-        
-        st.success(f"✅ {len(df_categorized)} transazioni salvate nel Google Sheet!")
-    except Exception as e:
-        st.error(f"❌ Errore nel salvataggio: {e}")
-
-
 # ---------- UI PRINCIPALE ----------
 
 if uploaded_file is not None:
@@ -373,6 +325,16 @@ if uploaded_file is not None:
         df_categorized = df_internal.apply(categorize_row, axis=1)
 
         st.subheader("📚 Transazioni categorizzate")
+        
+        # PULSANTE DOWNLOAD
+        csv_export = df_categorized.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="💾 Scarica dati categorizzati (CSV)",
+            data=csv_export,
+            file_name=f"finanze_categorizzate_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
+        
         st.dataframe(df_categorized, use_container_width=True, hide_index=True)
 
         col_a, col_b, col_c = st.columns(3)
@@ -390,8 +352,6 @@ if uploaded_file is not None:
                 else "N/D"
             )
             st.metric("Periodo coperto", periodo)
-
-        save_to_gsheets(df_categorized)
 
         st.markdown("### 🎛 Filtro periodo")
         start_date, end_date = st.date_input(
