@@ -285,7 +285,7 @@ def build_internal_df(
 
 def save_to_gsheets(df_categorized: pd.DataFrame):
     """Salva i dati nel Google Sheet"""
-        if spreadsheet is None:
+    if spreadsheet is None:
                     st.info("Google Sheets integration non configurata. Dati non salvati.")
                     return
 try:
