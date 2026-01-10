@@ -33,7 +33,7 @@ def init_gsheets():
 
 try:
         spreadsheet = init_gsheets()
-    except Exception as e:
+except Exception as e:
             st.warning(f"⚠️ Google Sheets integration non disponibile: {e}")
             spreadsheet = None
 
