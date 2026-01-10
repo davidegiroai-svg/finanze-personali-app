@@ -24,18 +24,18 @@ def init_gsheets():
         "https://www.googleapis.com/auth/drive"
     ]
     creds = Credentials.from_service_account_info(
-        st.secrets.get("gsheet_creds", {}),
+        st.secrets["connections"]["gsheets"],
         scopes=scope
     )
     gc = gspread.authorize(creds)
-    spreadsheet = gc.open_by_key(st.secrets.get("spreadsheet_id", ""))
+    spreadsheet = gc.open_by_key(st.secrets["config"]["SPREADSHEET_ID"])
     return spreadsheet
 
 try:
-        spreadsheet = init_gsheets()
+    spreadsheet = init_gsheets()
 except Exception as e:
-            st.warning(f"⚠️ Google Sheets integration non disponibile: {e}")
-            spreadsheet = None
+    st.error(f"Errore connessione Google Sheets: {e}")
+    st.stop()
 
 st.sidebar.header("📁 Carica estratto conto")
 
@@ -217,7 +217,6 @@ def build_internal_df(
     col_iban: str | None = None
 ) -> pd.DataFrame:
     df = df_raw.copy()
-
     df["date"] = pd.to_datetime(df[col_date], errors="coerce", dayfirst=True)
 
     if col_name and col_name in df.columns:
@@ -270,27 +269,16 @@ def build_internal_df(
     df = df.sort_values("date")
 
     cols = [
-        "date",
-        "description",
-        "amount",
-        "account",
-        "bank_category",
-        "direction",
-        "macro_category",
-        "subcategory",
-        "normalized_merchant",
+        "date", "description", "amount", "account", "bank_category",
+        "direction", "macro_category", "subcategory", "normalized_merchant",
     ]
     return df[cols]
 
 
 def save_to_gsheets(df_categorized: pd.DataFrame):
     """Salva i dati nel Google Sheet"""
-    if spreadsheet is None:
-                    st.info("Google Sheets integration non configurata. Dati non salvati.")
-                    return
-try:
+    try:
         general_sheet = spreadsheet.worksheet("Generale")
-        
         rows_to_save = []
         for _, row in df_categorized.iterrows():
             rows_to_save.append([
@@ -303,7 +291,6 @@ try:
                 row["subcategory"],
                 row["normalized_merchant"],
             ])
-        
         if rows_to_save:
             general_sheet.append_rows(rows_to_save)
             st.success(f"✅ {len(rows_to_save)} transazioni salvate nel Google Sheet!")
@@ -386,11 +373,7 @@ if uploaded_file is not None:
         df_categorized = df_internal.apply(categorize_row, axis=1)
 
         st.subheader("📚 Transazioni categorizzate")
-        st.dataframe(
-            df_categorized,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.dataframe(df_categorized, use_container_width=True, hide_index=True)
 
         col_a, col_b, col_c = st.columns(3)
         with col_a:
@@ -408,7 +391,6 @@ if uploaded_file is not None:
             )
             st.metric("Periodo coperto", periodo)
 
-        # Salva nel Google Sheet
         save_to_gsheets(df_categorized)
 
         st.markdown("### 🎛 Filtro periodo")
@@ -422,7 +404,6 @@ if uploaded_file is not None:
             pd.to_datetime(start_date), pd.to_datetime(end_date)
         )
         df_filtered = df_categorized[mask].copy()
-
         df_filtered["amount_abs"] = df_filtered["amount"].abs()
 
         st.markdown("### 📌 Sintesi periodo selezionato")
@@ -508,4 +489,3 @@ else:
           cambiarle dalla mappatura.
         """
     )
-
