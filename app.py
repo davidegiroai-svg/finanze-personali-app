@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date
 import plotly.express as px
-import google.generativeai as genai
+from huggingface_hub import InferenceClient
 import json
 
 # ---------------------------------------------------------
@@ -18,20 +18,20 @@ st.title("💰 Gestione Finanze Personali")
 st.markdown("---")
 
 # ---------------------------------------------------------
-# Inizializzazione Gemini
+# Inizializzazione Hugging Face
 # ---------------------------------------------------------
 @st.cache_resource
-def init_gemini():
+def init_ai():
     try:
-        genai.configure(api_key=st.secrets["gemini"]["api_key"])
-        # Prova prima gemini-1.5-flash, se non va fallback su gemini-pro
-        model = genai.GenerativeModel("gemini-pro")
-        return model
+        client = InferenceClient(
+            token=st.secrets["huggingface"]["api_key"]
+        )
+        return client
     except Exception as e:
         st.warning(f"⚠️ AI non disponibile: {e}")
         return None
 
-gemini_model = init_gemini()
+ai_client = init_ai()
 
 # ---------------------------------------------------------
 # Sidebar: upload + opzioni
@@ -176,8 +176,8 @@ def match_keywords(description: str, rules: dict):
                 return category
     return None
 
-def ai_batch_categorize(transactions: list, model) -> dict:
-    if model is None or len(transactions) == 0:
+def ai_batch_categorize(transactions: list, client) -> dict:
+    if client is None or len(transactions) == 0:
         return {}
     try:
         trans_list = "\n".join(
@@ -190,10 +190,19 @@ Transazioni da categorizzare:
 {trans_list}
 Rispondi SOLO con un JSON valido in questo formato: {{"0": "Nome sottocategoria", "1": "Nome sottocategoria", ...}}
 Usa SOLO i nomi esatti delle sottocategorie della lista."""
-        response = model.generate_content(prompt)
-        result_text = response.text.strip()
 
-        # Pulisci eventuale code block ```json ... ``` (BUG FIX)
+        messages = [{"role": "user", "content": prompt}]
+        
+        response = client.chat_completion(
+            messages=messages,
+            model="mistralai/Mistral-7B-Instruct-v0.2",
+            max_tokens=2000,
+            temperature=0.1
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+
+        # Pulisci eventuale code block
         if "```json" in result_text:
             result_text = result_text.split("```json", 1)[1]
             result_text = result_text.split("```", 1).strip()
@@ -240,8 +249,8 @@ def categorize_row_basic(row):
     row["subcategory"] = "Altro variabile"
     return row
 
-def generate_budget_advice(df, model):
-    if model is None:
+def generate_budget_advice(df, client):
+    if client is None:
         return "AI non disponibile per consigli."
     try:
         entrate = df[df["macro_category"] == "Entrata"]["amount"].sum()
@@ -265,8 +274,15 @@ Dati periodo analizzato:
 Principali spese variabili:
 {var_by_cat.to_string()}
 Fornisci consigli pratici, con numeri specifici e percentuali. Sii conciso (max 4 punti)."""
-        response = model.generate_content(prompt)
-        return response.text.strip()
+
+        messages = [{"role": "user", "content": prompt}]
+        response = client.chat_completion(
+            messages=messages,
+            model="mistralai/Mistral-7B-Instruct-v0.2",
+            max_tokens=500,
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
     except Exception as e:
         return f"Errore generazione consigli: {e}"
 
@@ -412,7 +428,7 @@ if uploaded_file is not None:
         with st.spinner("📊 Categorizzazione con regole..."):
             df_categorized = df_internal.apply(categorize_row_basic, axis=1)
 
-        if use_ai and gemini_model:
+        if use_ai and ai_client:
             uncategorized = df_categorized[df_categorized["subcategory"] == "Altro variabile"]
             if len(uncategorized) > 0:
                 st.info(
@@ -425,7 +441,7 @@ if uploaded_file is not None:
                 with st.spinner(
                     f"🤖 Categorizzazione AI in corso ({len(trans_for_ai)} transazioni)..."
                 ):
-                    ai_results = ai_batch_categorize(trans_for_ai, gemini_model)
+                    ai_results = ai_batch_categorize(trans_for_ai, ai_client)
                 if ai_results:
                     for idx_str, subcategory in ai_results.items():
                         try:
@@ -546,10 +562,10 @@ if uploaded_file is not None:
         else:
             st.info("Nessuna spesa variabile nel periodo selezionato.")
 
-        if gemini_model and len(df_filtered) > 0:
+        if ai_client and len(df_filtered) > 0:
             st.markdown("### 💡 Consigli AI per il budget")
             with st.spinner("🤖 Sto generando consigli personalizzati..."):
-                consigli = generate_budget_advice(df_filtered, gemini_model)
+                consigli = generate_budget_advice(df_filtered, ai_client)
             st.info(consigli)
 
         st.markdown("### 📚 Transazioni filtrate")
