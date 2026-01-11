@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date
 import plotly.express as px
+from groq import Groq
 
 st.set_page_config(
     page_title="Finanze Personali",
@@ -12,6 +13,20 @@ st.set_page_config(
 st.title("💰 Gestione Finanze Personali")
 st.markdown("---")
 
+# ---------- INIZIALIZZA GROQ AI ----------
+
+@st.cache_resource
+def init_groq():
+    """Inizializza client Groq AI"""
+    try:
+        client = Groq(api_key=st.secrets["groq"]["api_key"])
+        return client
+    except Exception as e:
+        st.warning(f"⚠️ AI non disponibile: {e}")
+        return None
+
+groq_client = init_groq()
+
 st.sidebar.header("📁 Carica estratto conto")
 
 uploaded_file = st.sidebar.file_uploader(
@@ -21,6 +36,10 @@ uploaded_file = st.sidebar.file_uploader(
 
 st.sidebar.markdown("—")
 st.sidebar.caption("Supporto Hype + altre banche (mappatura colonne manuale).")
+
+# Opzione AI
+st.sidebar.markdown("### 🤖 Intelligenza Artificiale")
+use_ai = st.sidebar.checkbox("Usa AI per riclassificare 'Altro variabile'", value=True)
 
 
 # ---------- UTILITÀ CARICAMENTO CSV ----------
@@ -45,7 +64,7 @@ FIXED_KEYWORDS = {
     "Utenze casa": ["enel", "a2a", "hera", "iren", "gas", "luce", "energia", "acqua"],
     "Abbonamenti ricorrenti": [
         "netflix", "spotify", "prime video", "now tv", "disney",
-        "abbonamento", "subscription", "telefono", "mobile", "internet", "fibra", "iliad", "hype plus"
+        "abbonamento", "subscription", "telefono", "mobile", "internet", "fibra", "iliad", "hype plus", "canone"
     ],
     "Rate & debiti": ["prestito", "loan", "finanziamento", "rate", "credito al consumo"],
 }
@@ -82,7 +101,7 @@ VARIABLE_KEYWORDS = {
     ],
     "Cultura & formazione": [
         "libreria", "feltrinelli", "ibs", "corso", "master", "udemy",
-        "coursera", "libro", "libri"
+        "coursera", "libro", "libri", "cinema"
     ],
     "Casa & arredo": [
         "brico", "leroy merlin", "obi", "ikea", "casaforte", "arredo", "risparmio casa"
@@ -100,7 +119,7 @@ VARIABLE_KEYWORDS = {
 
 SAVINGS_INVEST_KEYWORDS = {
     "Risparmio conto / deposito": [
-        "conto deposito", "risparmio", "saving", "savings"
+        "conto deposito", "risparmio", "saving", "savings", "deposito", "caparra"
     ],
     "Investimenti azioni/ETF": [
         "degiro", "etoro", "revolut trading", "trade republic",
@@ -115,10 +134,13 @@ SAVINGS_INVEST_KEYWORDS = {
 }
 
 INCOME_KEYWORDS = {
-    "Stipendio & lavoro": ["stipendio", "salary", "paga", "retribuzione", "busta paga", "azioninnova", "saldo", "compenso"],
+    "Stipendio & lavoro": ["stipendio", "salary", "paga", "retribuzione", "busta paga", "azioninnova", "saldo", "compenso", "mensilita"],
     "Rimborsi & rientri": ["rimborso", "refund", "rimborso spese", "chargeback", "accredito", "restituzione", "referendum"],
     "Entrate passive": ["interessi", "dividendo", "royalty", "cedola"],
 }
+
+# Lista sottocategorie per AI
+ALL_SUBCATEGORIES = list(FIXED_KEYWORDS.keys()) + list(VARIABLE_KEYWORDS.keys()) + list(SAVINGS_INVEST_KEYWORDS.keys()) + list(INCOME_KEYWORDS.keys())
 
 
 def normalize_text(s: str) -> str:
@@ -147,7 +169,50 @@ def match_keywords(description: str, rules: dict) -> str | None:
     return None
 
 
-def categorize_row(row: pd.Series) -> pd.Series:
+def ai_categorize(description: str, amount: float, client: Groq) -> tuple[str, str]:
+    """Usa Groq AI per categorizzare una transazione"""
+    if client is None:
+        return "Variabile", "Altro variabile"
+    
+    try:
+        prompt = f"""Sei un esperto di finanza personale. Classifica questa transazione bancaria italiana in UNA delle seguenti sottocategorie.
+
+Transazione:
+- Descrizione: "{description}"
+- Importo: {amount}€
+
+Sottocategorie disponibili:
+{', '.join(ALL_SUBCATEGORIES)}
+
+Rispondi SOLO con il nome esatto della sottocategoria più appropriata, senza spiegazioni."""
+
+        response = client.chat.completions.create(
+            model=st.secrets["groq"]["model"],
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=50
+        )
+        
+        subcategory = response.choices[0].message.content.strip()
+        
+        # Determina macro categoria dalla sottocategoria
+        if subcategory in FIXED_KEYWORDS:
+            return "Fisso", subcategory
+        elif subcategory in VARIABLE_KEYWORDS:
+            return "Variabile", subcategory
+        elif subcategory in SAVINGS_INVEST_KEYWORDS:
+            return "Risparmi & investimenti", subcategory
+        elif subcategory in INCOME_KEYWORDS:
+            return "Entrata", subcategory
+        else:
+            return "Variabile", "Altro variabile"
+            
+    except Exception as e:
+        st.warning(f"AI errore: {e}")
+        return "Variabile", "Altro variabile"
+
+
+def categorize_row(row: pd.Series, use_ai: bool = False, ai_client = None) -> pd.Series:
     desc = row["description"]
     amount = row["amount"] or 0.0
 
@@ -177,9 +242,57 @@ def categorize_row(row: pd.Series) -> pd.Series:
         row["subcategory"] = sub_var
         return row
 
-    row["macro_category"] = "Variabile"
-    row["subcategory"] = "Altro variabile"
+    # Se nessuna keyword matcha e AI è attiva, usa AI
+    if use_ai and ai_client:
+        macro, sub = ai_categorize(desc, amount, ai_client)
+        row["macro_category"] = macro
+        row["subcategory"] = sub
+    else:
+        row["macro_category"] = "Variabile"
+        row["subcategory"] = "Altro variabile"
+    
     return row
+
+
+def generate_budget_advice(df: pd.DataFrame, client: Groq) -> str:
+    """Genera consigli AI per allocazione budget mensile"""
+    if client is None:
+        return "AI non disponibile per consigli."
+    
+    try:
+        # Calcola totali
+        entrate = df[df["macro_category"] == "Entrata"]["amount"].sum()
+        fisso = abs(df[df["macro_category"] == "Fisso"]["amount"].sum())
+        variabile = abs(df[df["macro_category"] == "Variabile"]["amount"].sum())
+        risparmi = abs(df[df["macro_category"] == "Risparmi & investimenti"]["amount"].sum())
+        
+        # Sottocategorie variabili principali
+        var_by_cat = df[df["macro_category"] == "Variabile"].groupby("subcategory")["amount"].sum().abs().sort_values(ascending=False).head(5)
+        
+        prompt = f"""Sei un consulente finanziario personale. Analizza questi dati e dai 3-4 consigli pratici per ottimizzare il budget mensile.
+
+Dati periodo analizzato:
+- Entrate totali: {entrate:.0f}€
+- Spese fisse: {fisso:.0f}€ ({(fisso/entrate*100) if entrate > 0 else 0:.1f}%)
+- Spese variabili: {variabile:.0f}€ ({(variabile/entrate*100) if entrate > 0 else 0:.1f}%)
+- Risparmi/investimenti: {risparmi:.0f}€ ({(risparmi/entrate*100) if entrate > 0 else 0:.1f}%)
+
+Principali spese variabili:
+{var_by_cat.to_string()}
+
+Fornisci consigli pratici, con numeri specifici e percentuali. Sii conciso (max 4 punti)."""
+
+        response = client.chat.completions.create(
+            model=st.secrets["groq"]["model"],
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=500
+        )
+        
+        return response.choices[0].message.content.strip()
+        
+    except Exception as e:
+        return f"Errore generazione consigli: {e}"
 
 
 def build_internal_df(
@@ -322,7 +435,12 @@ if uploaded_file is not None:
             col_iban=None if col_iban == "(nessuna)" else col_iban,
         )
 
-        df_categorized = df_internal.apply(categorize_row, axis=1)
+        # Categorizzazione con AI
+        with st.spinner("🤖 Categorizzazione in corso..."):
+            df_categorized = df_internal.apply(
+                lambda row: categorize_row(row, use_ai=use_ai, ai_client=groq_client),
+                axis=1
+            )
 
         st.subheader("📚 Transazioni categorizzate")
         
@@ -428,6 +546,13 @@ if uploaded_file is not None:
             st.plotly_chart(fig_sub, use_container_width=True)
         else:
             st.info("Nessuna spesa variabile nel periodo selezionato.")
+
+        # CONSIGLI AI BUDGET
+        if groq_client and len(df_filtered) > 0:
+            st.markdown("### 💡 Consigli AI per il budget")
+            with st.spinner("🤖 Sto generando consigli personalizzati..."):
+                consigli = generate_budget_advice(df_filtered, groq_client)
+            st.info(consigli)
 
         st.markdown("### 📚 Transazioni filtrate")
         st.dataframe(
