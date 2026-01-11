@@ -320,7 +320,8 @@ def build_internal_df(
     )
 
     def parse_amount(x: str) -> float | None:
-        if x is None or x == "" or x.lower() == "nan":            return None
+        if x is None or x == "" or x.lower() == "nan":            
+            return None
         if "," in x and x.rfind(",") > x.rfind("."):
             x = x.replace(".", "").replace(",", ".")
         elif "." in x and x.rfind(".") > x.rfind(","):
