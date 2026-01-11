@@ -24,7 +24,7 @@ st.markdown("---")
 def init_gemini():
     try:
         genai.configure(api_key=st.secrets["gemini"]["api_key"])
-        model = genai.GenerativeModel(st.secrets["gemini"]["model"])
+        model = genai.GenerativeModel("gemini-1.5-flash-001")
         return model
     except Exception as e:
         st.warning(f"⚠️ AI non disponibile: {e}")
