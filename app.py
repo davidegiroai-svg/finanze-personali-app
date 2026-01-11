@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime, date
 import plotly.express as px
 from groq import Groq
+import json
 
 st.set_page_config(
     page_title="Finanze Personali",
@@ -139,7 +140,6 @@ INCOME_KEYWORDS = {
     "Entrate passive": ["interessi", "dividendo", "royalty", "cedola"],
 }
 
-# Lista sottocategorie per AI
 ALL_SUBCATEGORIES = list(FIXED_KEYWORDS.keys()) + list(VARIABLE_KEYWORDS.keys()) + list(SAVINGS_INVEST_KEYWORDS.keys()) + list(INCOME_KEYWORDS.keys())
 
 
@@ -169,50 +169,56 @@ def match_keywords(description: str, rules: dict) -> str | None:
     return None
 
 
-def ai_categorize(description: str, amount: float, client: Groq) -> tuple[str, str]:
-    """Usa Groq AI per categorizzare una transazione"""
-    if client is None:
-        return "Variabile", "Altro variabile"
+def ai_batch_categorize(transactions: list, client: Groq) -> dict:
+    """Categorizza tutte le transazioni in batch con UNA SOLA chiamata AI"""
+    if client is None or len(transactions) == 0:
+        return {}
     
     try:
-        prompt = f"""Sei un esperto di finanza personale. Classifica questa transazione bancaria italiana in UNA delle seguenti sottocategorie.
-
-Transazione:
-- Descrizione: "{description}"
-- Importo: {amount}€
+        # Prepara le transazioni per l'AI
+        trans_list = "\n".join([
+            f"{i}. Descrizione: '{t['description']}', Importo: {t['amount']}€"
+            for i, t in enumerate(transactions)
+        ])
+        
+        prompt = f"""Sei un esperto di finanza personale. Categorizza TUTTE queste transazioni bancarie italiane.
 
 Sottocategorie disponibili:
 {', '.join(ALL_SUBCATEGORIES)}
 
-Rispondi SOLO con il nome esatto della sottocategoria più appropriata, senza spiegazioni."""
+Transazioni da categorizzare:
+{trans_list}
+
+Rispondi SOLO con un JSON valido in questo formato:
+{{"0": "Nome sottocategoria", "1": "Nome sottocategoria", ...}}
+
+Usa SOLO i nomi esatti delle sottocategorie della lista."""
 
         response = client.chat.completions.create(
             model=st.secrets["groq"]["model"],
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
-            max_tokens=50
+            max_tokens=2000
         )
         
-        subcategory = response.choices[0].message.content.strip()
+        result_text = response.choices[0].message.content.strip()
         
-        # Determina macro categoria dalla sottocategoria
-        if subcategory in FIXED_KEYWORDS:
-            return "Fisso", subcategory
-        elif subcategory in VARIABLE_KEYWORDS:
-            return "Variabile", subcategory
-        elif subcategory in SAVINGS_INVEST_KEYWORDS:
-            return "Risparmi & investimenti", subcategory
-        elif subcategory in INCOME_KEYWORDS:
-            return "Entrata", subcategory
-        else:
-            return "Variabile", "Altro variabile"
-            
+        # Estrai JSON dalla risposta
+        if "```json" in result_text:
+            result_text = result_text.split("```json").split("```").strip()[1]
+        elif "```" in result_text:
+            result_text = result_text.split("```")[1].split("```")[0].strip()
+        
+        categorization = json.loads(result_text)
+        return categorization
+        
     except Exception as e:
-        st.warning(f"AI errore: {e}")
-        return "Variabile", "Altro variabile"
+        st.warning(f"AI batch errore: {e}")
+        return {}
 
 
-def categorize_row(row: pd.Series, use_ai: bool = False, ai_client = None) -> pd.Series:
+def categorize_row_basic(row: pd.Series) -> pd.Series:
+    """Categorizzazione base senza AI"""
     desc = row["description"]
     amount = row["amount"] or 0.0
 
@@ -242,15 +248,8 @@ def categorize_row(row: pd.Series, use_ai: bool = False, ai_client = None) -> pd
         row["subcategory"] = sub_var
         return row
 
-    # Se nessuna keyword matcha e AI è attiva, usa AI
-    if use_ai and ai_client:
-        macro, sub = ai_categorize(desc, amount, ai_client)
-        row["macro_category"] = macro
-        row["subcategory"] = sub
-    else:
-        row["macro_category"] = "Variabile"
-        row["subcategory"] = "Altro variabile"
-    
+    row["macro_category"] = "Variabile"
+    row["subcategory"] = "Altro variabile"
     return row
 
 
@@ -260,13 +259,11 @@ def generate_budget_advice(df: pd.DataFrame, client: Groq) -> str:
         return "AI non disponibile per consigli."
     
     try:
-        # Calcola totali
         entrate = df[df["macro_category"] == "Entrata"]["amount"].sum()
         fisso = abs(df[df["macro_category"] == "Fisso"]["amount"].sum())
         variabile = abs(df[df["macro_category"] == "Variabile"]["amount"].sum())
         risparmi = abs(df[df["macro_category"] == "Risparmi & investimenti"]["amount"].sum())
         
-        # Sottocategorie variabili principali
         var_by_cat = df[df["macro_category"] == "Variabile"].groupby("subcategory")["amount"].sum().abs().sort_values(ascending=False).head(5)
         
         prompt = f"""Sei un consulente finanziario personale. Analizza questi dati e dai 3-4 consigli pratici per ottimizzare il budget mensile.
@@ -323,8 +320,7 @@ def build_internal_df(
     )
 
     def parse_amount(x: str) -> float | None:
-        if x is None or x == "" or x.lower() == "nan":
-            return None
+        if x is None or x == "" or x.lower() == "nan":            return None
         if "," in x and x.rfind(",") > x.rfind("."):
             x = x.replace(".", "").replace(",", ".")
         elif "." in x and x.rfind(".") > x.rfind(","):
@@ -435,12 +431,49 @@ if uploaded_file is not None:
             col_iban=None if col_iban == "(nessuna)" else col_iban,
         )
 
-        # Categorizzazione con AI
-        with st.spinner("🤖 Categorizzazione in corso..."):
-            df_categorized = df_internal.apply(
-                lambda row: categorize_row(row, use_ai=use_ai, ai_client=groq_client),
-                axis=1
-            )
+        # CATEGORIZZAZIONE BASE (senza AI)
+        with st.spinner("📊 Categorizzazione con regole..."):
+            df_categorized = df_internal.apply(categorize_row_basic, axis=1)
+
+        # BATCH AI per "Altro variabile"
+        if use_ai and groq_client:
+            uncategorized = df_categorized[df_categorized["subcategory"] == "Altro variabile"]
+            
+            if len(uncategorized) > 0:
+                st.info(f"🤖 Trovate {len(uncategorized)} transazioni in 'Altro variabile'. L'AI le sta categorizzando...")
+                
+                # Prepara lista transazioni per AI
+                trans_for_ai = [
+                    {"description": row["description"], "amount": row["amount"]}
+                    for _, row in uncategorized.iterrows()
+                ]
+                
+                # UNA SOLA chiamata AI batch
+                with st.spinner(f"🤖 Categorizzazione AI in corso ({len(trans_for_ai)} transazioni)..."):
+                    ai_results = ai_batch_categorize(trans_for_ai, groq_client)
+                
+                # Applica i risultati AI
+                if ai_results:
+                    for idx_str, subcategory in ai_results.items():
+                        try:
+                            idx = int(idx_str)
+                            original_idx = uncategorized.iloc[idx].name
+                            
+                            # Determina macro dalla sottocategoria
+                            if subcategory in FIXED_KEYWORDS:
+                                df_categorized.at[original_idx, "macro_category"] = "Fisso"
+                            elif subcategory in VARIABLE_KEYWORDS:
+                                df_categorized.at[original_idx, "macro_category"] = "Variabile"
+                            elif subcategory in SAVINGS_INVEST_KEYWORDS:
+                                df_categorized.at[original_idx, "macro_category"] = "Risparmi & investimenti"
+                            elif subcategory in INCOME_KEYWORDS:
+                                df_categorized.at[original_idx, "macro_category"] = "Entrata"
+                            
+                            df_categorized.at[original_idx, "subcategory"] = subcategory
+                        except:
+                            pass
+                    
+                    st.success(f"✅ AI ha categorizzato {len(ai_results)} transazioni!")
 
         st.subheader("📚 Transazioni categorizzate")
         
@@ -575,3 +608,4 @@ else:
         """
     )
 
+            
