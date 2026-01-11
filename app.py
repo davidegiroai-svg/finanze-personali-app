@@ -25,7 +25,7 @@ def init_gemini():
     try:
         genai.configure(api_key=st.secrets["gemini"]["api_key"])
         # Prova prima gemini-1.5-flash, se non va fallback su gemini-pro
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-pro")
         return model
     except Exception as e:
         st.warning(f"⚠️ AI non disponibile: {e}")
