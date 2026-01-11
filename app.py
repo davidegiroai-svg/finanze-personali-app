@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date
+from datetime import date
 import plotly.express as px
 import google.generativeai as genai
 import json
@@ -193,7 +193,7 @@ Usa SOLO i nomi esatti delle sottocategorie della lista."""
             result_text = result_text.split("```json", 1)[1]
             result_text = result_text.split("```", 1).strip()
         elif "```" in result_text:
-            result_text = result_text.split("```", 1)[16]
+            result_text = result_text.split("```", 1)[2]
             result_text = result_text.split("```", 1)[0].strip()
 
         categorization = json.loads(result_text)
@@ -271,10 +271,8 @@ Fornisci consigli pratici, con numeri specifici e percentuali. Sii conciso (max 
 def build_internal_df(df_raw, col_date, col_desc, col_amount, col_name=None, col_type=None, col_iban=None):
     df = df_raw.copy()
 
-    # Data
     df["date"] = pd.to_datetime(df[col_date], errors="coerce", dayfirst=True)
 
-    # Descrizione = (nome esercente) + descrizione banca
     if col_name and col_name in df.columns:
         df["description"] = (
             df[col_name].astype(str).fillna("")
@@ -284,7 +282,6 @@ def build_internal_df(df_raw, col_date, col_desc, col_amount, col_name=None, col
     else:
         df["description"] = df[col_desc].astype(str)
 
-    # Importo
     raw_amount = (
         df[col_amount]
         .astype(str)
@@ -298,7 +295,6 @@ def build_internal_df(df_raw, col_date, col_desc, col_amount, col_name=None, col
         if x is None or x == "" or str(x).lower() == "nan":
             return None
         x = str(x)
-        # Formato europeo vs US
         if "," in x and x.rfind(",") > x.rfind("."):
             x = x.replace(".", "").replace(",", ".")
         elif "." in x and x.rfind(".") > x.rfind(","):
@@ -310,7 +306,6 @@ def build_internal_df(df_raw, col_date, col_desc, col_amount, col_name=None, col
 
     df["amount"] = raw_amount.apply(parse_amount)
 
-    # Altre colonne
     if col_iban and col_iban in df.columns:
         df["account"] = df[col_iban].astype(str)
     else:
@@ -350,7 +345,6 @@ def build_internal_df(df_raw, col_date, col_desc, col_amount, col_name=None, col
 if uploaded_file is None:
     st.info("Carica un CSV dell'estratto conto per iniziare.")
 else:
-    # Caricamento CSV grezzo
     df_raw = load_csv(uploaded_file)
     st.subheader("📄 Anteprima CSV originale")
     st.dataframe(df_raw.head())
@@ -395,13 +389,9 @@ else:
                 col_iban=iban_col,
             )
 
-            # Rimuove righe senza importo o data valida
             df_internal = df_internal.dropna(subset=["amount", "date"])
-
-            # Categorizzazione base
             df_internal = df_internal.apply(categorize_row_basic, axis=1)
 
-            # AI per "Altro variabile"
             if use_ai:
                 mask_ai = (
                     (df_internal["macro_category"] == "Variabile")
@@ -419,107 +409,113 @@ else:
                     ]
                     cat_map = ai_batch_categorize(transactions_for_ai, gemini_model)
 
-                    # Aggiorna sottocategorie dove ai ha risposto
                     for i, row in to_ai.iterrows():
                         idx = row["index"]
                         key = str(i)
                         if key in cat_map and cat_map[key] in ALL_SUBCATEGORIES:
                             df_internal.loc[idx, "subcategory"] = cat_map[key]
 
-            # Salva in sessione
             st.session_state["df_internal"] = df_internal
 
-    # Se abbiamo già elaborato (o appena elaborato)
     if "df_internal" in st.session_state:
         df_internal = st.session_state["df_internal"]
 
         st.markdown("### 📊 Transazioni elaborate")
         st.dataframe(df_internal.head(50))
 
-        # Filtri periodo
-        st.markdown("### 🗓️ Filtri")
-        col1, col2 = st.columns(2)
-        with col1:
+        if df_internal.empty:
+            st.warning("Nessuna transazione valida trovata.")
+        else:
+            st.markdown("### 🗓️ Filtri")
+
             min_date = df_internal["date"].min().date()
             max_date = df_internal["date"].max().date()
-            start_date = st.date_input("Data inizio", value=min_date, min_value=min_date, max_value=max_date)
-        with col2:
-            end_date = st.date_input("Data fine", value=max_date, min_value=min_date, max_value=max_date)
 
-        mask_period = (df_internal["date"] >= pd.to_datetime(start_date)) & (
-            df_internal["date"] <= pd.to_datetime(end_date)
-        )
-        df_period = df_internal[mask_period].copy()
-
-        if df_period.empty:
-            st.warning("Nessuna transazione nel periodo selezionato.")
-        else:
-            # Riepilogo
-            entrate = df_period[df_period["macro_category"] == "Entrata"]["amount"].sum()
-            spese_fisse = df_period[df_period["macro_category"] == "Fisso"]["amount"].sum()
-            spese_var = df_period[df_period["macro_category"] == "Variabile"]["amount"].sum()
-            risparmi = df_period[df_period["macro_category"] == "Risparmi & investimenti"]["amount"].sum()
-            saldo = df_period["amount"].sum()
-
-            st.markdown("### 📌 Riepilogo periodo")
-
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Entrate", f"{entrate:,.0f}€")
-            c2.metric("Spese fisse", f"{spese_fisse:,.0f}€")
-            c3.metric("Spese variabili", f"{spese_var:,.0f}€")
-            c4.metric("Risparmi / investimenti", f"{risparmi:,.0f}€")
-            c5.metric("Saldo netto", f"{saldo:,.0f}€")
-
-            # Grafici
-            st.markdown("### 📈 Grafici")
-
-            col_a, col_b = st.columns(2)
-
-            # Spese per macro categoria
-            df_spese = df_period[df_period["amount"] < 0].copy()
-            if not df_spese.empty:
-                df_macro = (
-                    df_spese.groupby("macro_category")["amount"]
-                    .sum()
-                    .abs()
-                    .reset_index()
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input(
+                    "Data inizio",
+                    value=min_date,
+                    min_value=min_date,
+                    max_value=max_date,
                 )
-                fig_macro = px.pie(
-                    df_macro,
-                    names="macro_category",
-                    values="amount",
-                    title="Spese per macro categoria",
+            with col2:
+                end_date = st.date_input(
+                    "Data fine",
+                    value=max_date,
+                    min_value=min_date,
+                    max_value=max_date,
                 )
-                col_a.plotly_chart(fig_macro, use_container_width=True)
 
-                df_sub = (
-                    df_spese.groupby("subcategory")["amount"]
-                    .sum()
-                    .abs()
-                    .sort_values(ascending=False)
-                    .reset_index()
-                )
-                fig_sub = px.bar(
-                    df_sub,
-                    x="subcategory",
-                    y="amount",
-                    title="Top spese per sottocategoria",
-                )
-                fig_sub.update_layout(xaxis_tickangle=-45)
-                col_b.plotly_chart(fig_sub, use_container_width=True)
-
-            # Serie temporale saldo cumulato
-            df_period_sorted = df_period.sort_values("date")
-            df_period_sorted["cum_balance"] = df_period_sorted["amount"].cumsum()
-            fig_time = px.line(
-                df_period_sorted,
-                x="date",
-                y="cum_balance",
-                title="Andamento saldo cumulato",
+            mask_period = (df_internal["date"] >= pd.to_datetime(start_date)) & (
+                df_internal["date"] <= pd.to_datetime(end_date)
             )
-            st.plotly_chart(fig_time, use_container_width=True)
+            df_period = df_internal[mask_period].copy()
 
-            # Consigli AI
-            st.markdown("### 🧠 Consigli personalizzati sul budget")
-            advice = generate_budget_advice(df_period, gemini_model)
-            st.write(advice)
+            if df_period.empty:
+                st.warning("Nessuna transazione nel periodo selezionato.")
+            else:
+                entrate = df_period[df_period["macro_category"] == "Entrata"]["amount"].sum()
+                spese_fisse = df_period[df_period["macro_category"] == "Fisso"]["amount"].sum()
+                spese_var = df_period[df_period["macro_category"] == "Variabile"]["amount"].sum()
+                risparmi = df_period[df_period["macro_category"] == "Risparmi & investimenti"]["amount"].sum()
+                saldo = df_period["amount"].sum()
+
+                st.markdown("### 📌 Riepilogo periodo")
+
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Entrate", f"{entrate:,.0f}€")
+                c2.metric("Spese fisse", f"{spese_fisse:,.0f}€")
+                c3.metric("Spese variabili", f"{spese_var:,.0f}€")
+                c4.metric("Risparmi / investimenti", f"{risparmi:,.0f}€")
+                c5.metric("Saldo netto", f"{saldo:,.0f}€")
+
+                st.markdown("### 📈 Grafici")
+
+                col_a, col_b = st.columns(2)
+
+                df_spese = df_period[df_period["amount"] < 0].copy()
+                if not df_spese.empty:
+                    df_macro = (
+                        df_spese.groupby("macro_category")["amount"]
+                        .sum()
+                        .abs()
+                        .reset_index()
+                    )
+                    fig_macro = px.pie(
+                        df_macro,
+                        names="macro_category",
+                        values="amount",
+                        title="Spese per macro categoria",
+                    )
+                    col_a.plotly_chart(fig_macro, use_container_width=True)
+
+                    df_sub = (
+                        df_spese.groupby("subcategory")["amount"]
+                        .sum()
+                        .abs()
+                        .sort_values(ascending=False)
+                        .reset_index()
+                    )
+                    fig_sub = px.bar(
+                        df_sub,
+                        x="subcategory",
+                        y="amount",
+                        title="Top spese per sottocategoria",
+                    )
+                    fig_sub.update_layout(xaxis_tickangle=-45)
+                    col_b.plotly_chart(fig_sub, use_container_width=True)
+
+                df_period_sorted = df_period.sort_values("date")
+                df_period_sorted["cum_balance"] = df_period_sorted["amount"].cumsum()
+                fig_time = px.line(
+                    df_period_sorted,
+                    x="date",
+                    y="cum_balance",
+                    title="Andamento saldo cumulato",
+                )
+                st.plotly_chart(fig_time, use_container_width=True)
+
+                st.markdown("### 🧠 Consigli personalizzati sul budget")
+                advice = generate_budget_advice(df_period, gemini_model)
+                st.write(advice)
