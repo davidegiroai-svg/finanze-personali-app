@@ -24,7 +24,8 @@ st.markdown("---")
 def init_gemini():
     try:
         genai.configure(api_key=st.secrets["gemini"]["api_key"])
-        model = genai.GenerativeModel("gemini-1.5-flash-001")
+        # Prova prima gemini-1.5-flash, se non va fallback su gemini-pro
+        model = genai.GenerativeModel("gemini-1.5-flash")
         return model
     except Exception as e:
         st.warning(f"⚠️ AI non disponibile: {e}")
@@ -192,12 +193,12 @@ Usa SOLO i nomi esatti delle sottocategorie della lista."""
         response = model.generate_content(prompt)
         result_text = response.text.strip()
 
-        # Pulisci eventuale code block ```json ... ```
+        # Pulisci eventuale code block ```json ... ``` (BUG FIX)
         if "```json" in result_text:
             result_text = result_text.split("```json", 1)[1]
             result_text = result_text.split("```", 1).strip()
         elif "```" in result_text:
-            result_text = result_text.split("```", 1)[16]
+            result_text = result_text.split("```", 1)[11]
             result_text = result_text.split("```", 1)[0].strip()
 
         categorization = json.loads(result_text)
